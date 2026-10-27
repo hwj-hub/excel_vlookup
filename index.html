@@ -2096,17 +2096,18 @@ function runLookup(ta, tb, pairs, o){
   const st = new Uint8Array(nA);                          /* 0 찾음 · 1 못 찾음 · 2 찾을 값이 빈칸 */
   const flag = new Uint8Array(nA);                        /* 1 엑셀이면 #N/A · 2 와일드카드로 다른 줄 · 4 앞자리 0 으로 이음 · 8 엑셀이면 0 으로 보임 */
   const lists = new Map();
-  const causes = new Map();
+  const causes = new Map(), causeVals = new Map();        /* 줄 → 까닭들 · 그 까닭이 나온 두 값 */
   const usedB = new Uint8Array(nB);
-  const C = {};                                           /* 까닭 → {n, a, b, ex:[]} */
-  const addCause = (i, key, side, av, bv) => {
+  const C = {};                                           /* 까닭 → {n, a, b, ex:[], p} — p 는 처음 나온 조건 번호 */
+  const addCause = (i, key, side, av, bv, p) => {
     let c = C[key];
-    if(!c) c = C[key] = {key, n: 0, a: 0, b: 0, ex: []};
+    if(!c) c = C[key] = {key, n: 0, a: 0, b: 0, ex: [], p: p || 0};
     c.n++;
     if(side.indexOf('a') >= 0) c.a++;
     if(side.indexOf('b') >= 0) c.b++;
     if(c.ex.length < 4) c.ex.push({i, a: av, b: bv});
     const l = causes.get(i); if(l) l.push(key); else causes.set(i, [key]);
+    const v = causeVals.get(i); if(v) v.push([av, bv]); else causeVals.set(i, [[av, bv]]);
   };
   const S = {total: nA, found: 0, miss: 0, blank: 0, multi: 0, xlNA: 0, fixed: 0, wild: 0, zero: 0, unusedB: 0, dupKeys, dupRows};
   /* 엑셀은 #N/A 인데 너그럽게는 찾은 줄 — 원래 값 둘을 견줘 까닭을 적는다 */
@@ -2114,15 +2115,18 @@ function runLookup(ta, tb, pairs, o){
     const brow = tb.data[j].v;
     flag[i] |= 1; S.fixed++;
     if(xlr[i] === -2){ addCause(i, 'long', 'a', row[ka[0]], brow[kb[0]]); return; }
+    /* 조건이 여럿이면 실제로 다른 조건 열의 두 값을 예로 남긴다(이름이 아니라 생년월일이 달랐으면 생년월일) */
     const out = [];
     for(let p = 0; p < ka.length; p++){
       const av = row[ka[p]], bv = brow[kb[p]];
       if(single ? xlKey(av) === xlKey(bv) : xlEqKey(av) === xlEqKey(bv)) continue;
+      const n0 = out.length;
       whyDiff(av, bv, o, out);
+      for(let q = n0; q < out.length; q++) out[q].push(av, bv, p);
     }
-    if(!out.length) out.push(['other', '']);
+    if(!out.length) out.push(['other', '', row[ka[0]], brow[kb[0]], 0]);
     const seen = new Set();
-    for(const [k, side] of out){ if(seen.has(k)) continue; seen.add(k); addCause(i, k, side, row[ka[0]], brow[kb[0]]); }
+    for(const [k, side, av, bv, p] of out){ if(seen.has(k)) continue; seen.add(k); addCause(i, k, side, av, bv, p); }
   };
 
   for(let i = 0; i < nA; i++){
@@ -2180,7 +2184,7 @@ function runLookup(ta, tb, pairs, o){
     }
   }
   for(let j = 0; j < nB; j++) if(!usedB[j]) S.unusedB++;
-  return {ta, tb, pairs, o, first, cnt, xlr, st, flag, lists, causes, usedB, C, S};
+  return {ta, tb, pairs, o, first, cnt, xlr, st, flag, lists, causes, causeVals, usedB, C, S};
 }
 
 /* ══ 가져온 값 ══
@@ -2367,7 +2371,7 @@ function buildFormula(ctx, retCol, kind){
     t(rR, 3); t(',');
     if(multiKey) t(cond(), 2); else { t(kR[0], 2); t('='); t(looks[0], 1); }
     t(',"")))');
-    note = 'TEXTJOIN·FILTER·UNIQUE 는 마이크로소프트 365·엑셀 2021 이상에서 됩니다.';
+    note = 'TEXTJOIN·FILTER·UNIQUE 는 엑셀 2021 이상과 365 에서 됩니다.';
     return {P, ok, note, fn: 'TEXTJOIN'};
   }
   const last = mm === 'last';
@@ -2396,7 +2400,7 @@ function buildFormula(ctx, retCol, kind){
     if(nf !== null || last){ t(','); t(nf !== null ? nf : '', 5); }
     if(last){ t(',0,'); t('-1', 4); }
     t(')');
-    if(!note) note = 'XLOOKUP 은 마이크로소프트 365·엑셀 2021 이상에서 됩니다. 2019 이하라면 INDEX·MATCH 를 쓰세요.';
+    if(!note) note = 'XLOOKUP 은 엑셀 2021 이상과 365 에서 됩니다. 2019 이하라면 INDEX·MATCH 를 쓰세요.';
     return {P, ok, note, fn: 'XLOOKUP'};
   }
   /* INDEX / MATCH */
@@ -3513,9 +3517,10 @@ function showVal(v){
   return '<span class="sv">' + (out || '&nbsp;') + '<em>' + wide + (nfd ? '자모 분리 ' : '') + (NUMTXT.test(s.trim()) ? '글자(숫자 모양)' : '글자') + '</em></span>';
 }
 /* 고치는 법 — 지금 수식에 쓰는 찾을 값 칸(예: $C2)으로 적는다 */
-function fixHtml(c, look){
+function fixHtml(c, look, multiKey){
   const a = c.a > 0, b = c.b > 0;
-  const V = inner => '<code>=VLOOKUP(' + inner + ',…)</code>';
+  /* 조건이 하나면 VLOOKUP 의 찾을 값 자리, 여럿이면 XLOOKUP 조건식의 그 칸 자리를 고친다 */
+  const V = inner => multiKey ? '수식의 <code>' + look + '</code> 자리를 <code>' + inner + '</code> 로' : '<code>=VLOOKUP(' + inner + ',…)</code>';
   const helper = f => '가져올 표 쪽이면 수식으로는 못 고칩니다 — 옆에 보조 열을 만들어 <code>' + f + '</code> 를 채운 뒤 복사 → 값만 붙여 넣기로 원래 열을 덮으세요.';
   const parts = [];
   switch(c.key){
@@ -3547,10 +3552,16 @@ function fixHtml(c, look){
       if(b) parts.push('가져올 표가 「0 이 붙은 글자」일 때: ' + V('TEXT(' + look + ',"' + fmt + '")'));
       break;
     }
-    case 'datetext':
+    case 'datetext': {
+      /* 가져올 표의 글자 모양(2026.01.05 · 2026-01-05 · 2026/01/05)에 맞춘 서식 */
+      const ex = c.ex.find(e => typeof e.b === 'string') || c.ex[0];
+      const t = ex && typeof ex.b === 'string' ? ex.b.trim() : '';
+      const sep = (/^\d{4}([.\-\/])/.exec(t) || [, '-'])[1];
+      const fmt = 'yyyy' + sep + 'mm' + sep + 'dd' + (/[.]$/.test(t) ? '.' : '');
       if(a) parts.push('찾을 값이 글자 날짜일 때: ' + V('DATEVALUE(' + look + ')'));
-      if(b) parts.push('가져올 표가 글자 날짜일 때: ' + V('TEXT(' + look + ',"yyyy-mm-dd")') + ' (표의 글자 모양에 맞추세요)');
+      if(b) parts.push('가져올 표가 글자 날짜일 때: ' + V('TEXT(' + look + ',"' + fmt + '")') + ' — 가져올 표의 글자 모양에 맞춘 서식입니다.');
       break;
+    }
     case 'float':
       parts.push('양쪽을 같은 자릿수로 반올림해 비교하세요: ' + V('ROUND(' + look + ',2)') + ' + 가져올 표에도 <code>=ROUND(A2,2)</code> 보조 열.');
       break;
@@ -3584,15 +3595,18 @@ function renderDiag(){
     : '엑셀 VLOOKUP 이었다면 <b>#N/A 가 났을 줄 ' + fmtN(fixed) + '개</b>를 이 도구는 찾아 붙였습니다.') +
     (real > 0 ? ' 나머지 ' + fmtN(real) + '줄은 가져올 표에 정말 없는 값입니다.' : '') +
     (list.length > 1 ? ' 한 줄에 원인이 둘 이상일 수 있습니다.' : '');
-  const look = S.ta && S.pairs.length ? '$' + colName(S.pairs[0].a) + (S.ta.data.length ? S.ta.data[0].r + 1 : 2) : 'A2';
+  const r0 = S.ta && S.ta.data.length ? S.ta.data[0].r + 1 : 2;
+  const multiKey = S.pairs.length > 1;
   $('causes').innerHTML = list.map(c => {
+    const pr = S.pairs[c.p] || S.pairs[0];
+    const look = pr ? '$' + colName(pr.a) + r0 : 'A2';
     const L = CAUSE[c.key] || CAUSE.other;
     const side = [c.a ? '채울 표 쪽 ' + fmtN(c.a) : '', c.b ? '가져올 표 쪽 ' + fmtN(c.b) : ''].filter(Boolean).join(' · ');
     const exs = c.ex.slice(0, 3).map(e => '<li><small>' + (S.ta.data[e.i].r + 1) + '행</small>' + showVal(e.a) + ' ↔ ' + showVal(e.b) + '</li>').join('');
     return '<li><div class="ch"><b>' + L[0] + '</b><span>' + fmtN(c.n) + '줄</span></div>' +
       '<div class="cw">' + L[1] + (side ? ' · ' + side : '') + '</div>' +
       (exs ? '<ul class="ex">' + exs + '</ul>' : '') +
-      '<div class="fix">' + fixHtml(c, look) + '</div></li>';
+      '<div class="fix">' + fixHtml(c, look, multiKey) + '</div></li>';
   }).join('');
 }
 
@@ -3773,10 +3787,11 @@ async function doReport(){
   for(let j = 0; j < tb.data.length; j++) if(!R.usedB[j]){ const v = tb.data[j].v.slice(0, tb.width); while(v.length < tb.width) v.push(null); unused.push([tb.data[j].r + 1].concat(v)); }
   const why = [['채울 표 행', '찾을 값', '가져올 표의 값', '원인', '설명']];
   for(const [i, keys] of R.causes){
-    const j = R.first[i] >= 0 ? R.first[i] : -1;
-    const av = ta.data[i].v[S.pairs[0].a];
-    const bv = j >= 0 ? tb.data[j].v[S.pairs[0].b] : (R.xlr[i] >= 0 ? tb.data[R.xlr[i]].v[S.pairs[0].b] : null);
-    for(const k of keys) why.push([ta.data[i].r + 1, visText(av), visText(bv), (CAUSE[k] || CAUSE.other)[0], (CAUSE[k] || CAUSE.other)[1]]);
+    const vals = R.causeVals.get(i) || [];
+    keys.forEach((k, n) => {
+      const [av, bv] = vals[n] || [null, null];
+      why.push([ta.data[i].r + 1, visText(av), visText(bv), (CAUSE[k] || CAUSE.other)[0], (CAUSE[k] || CAUSE.other)[1]]);
+    });
   }
   const ctx = fxCtx();
   const fx = [['가져올 열', 'VLOOKUP', 'XLOOKUP', 'INDEX·MATCH']];
